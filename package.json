@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "zip": "bestzip scraper.zip index.js node_modules package.json"
+    "zip": "bestzip scraper.zip index.js vivid.js node_modules package.json"
   },
   "keywords": [],
   "author": "",
@@ -12,6 +12,8 @@
   "description": "",
   "dependencies": {
     "@sparticuz/chromium": "^133.0.0",
+    "cheerio": "^1.0.0",
+    "puppeteer": "^24.9.0",
     "puppeteer-core": "^21.11.0"
   }
 }
