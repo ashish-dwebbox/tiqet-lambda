@@ -3,6 +3,13 @@ const cheerio = require("cheerio");
 const addDelay = require("./scraperUtils");
 const os = require("os");
 
+const puppeteerExtra = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { uploadFileToS3 } = require("./s3.utils");
+
+
+puppeteerExtra.use(StealthPlugin());
+
 const isLambda = !!process.env.AWS_LAMBDA;
 const width = 1280;
 const height = 720;
@@ -16,7 +23,7 @@ const scraperConfig = {
   timeout: 60000,
 };
 
-let successfullListings= [];
+let successfullListings = [];
 
 //STEP 6
 const generateJson = async (page, scraperLogger) => {
@@ -31,10 +38,7 @@ const generateJson = async (page, scraperLogger) => {
     // Filter to get only direct child divs
     const directChildDivs = [];
     for (const div of allDivs) {
-      const parent = await page.evaluate(
-        (el) => el.parentElement?.id,
-        div
-      );
+      const parent = await page.evaluate((el) => el.parentElement?.id, div);
       if (parent === "listingContainer") {
         directChildDivs.push(div);
       }
@@ -152,11 +156,7 @@ const extractListings = async (page, scraperLogger) => {
   // const listingContainer = await page.$$("#listingContainer");
 };
 
-const beginScraping = async (
-  page,
-  eventUrl,
-  scraperLogger
-) => {
+const beginScraping = async (page, eventUrl, scraperLogger) => {
   page.goto(eventUrl, {
     waitUntil: "domcontentloaded",
     timeout: scraperConfig.timeout,
@@ -168,51 +168,54 @@ const beginScraping = async (
 
   await generateJson(page, scraperLogger);
 };
-
 const getBrowserConfig = async () => {
-    if (isLambda) {
-      return {
-        headless: chromium.headless,
-        executablePath: await chromium.executablePath(),
-        args: [...chromium.args, `--window-size=${width},${height}`],
-        defaultViewport: { width, height },
-        timeout: scraperConfig.timeout,
-      };
-    } else {
-      const puppeteer = require("puppeteer"); // regular puppeteer for local dev
-      return {
-        headless: scraperConfig.headless,
-        executablePath: puppeteer.executablePath(),
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          `--window-size=${width},${height}`,
-        ],
-        timeout: scraperConfig.timeout,
-        defaultViewport: { width, height },
-      };
-    }
+  const baseConfig = {
+    args: [
+      ...chromium.args,
+      `--window-size=${width},${height}`,
+      "--disable-dev-shm-usage",
+      "--disable-setuid-sandbox",
+      "--no-sandbox",
+
+    ],
+    defaultViewport: { width, height },
+    timeout: scraperConfig.timeout,
+    ignoreHTTPSErrors: true,
   };
 
-const tickpickMultiScraper = async ({
-  eventUrl,
-  scraperLogger,
-}) => {
-    const puppeteerModule = isLambda
-    ? require("puppeteer-core")
-    : require("puppeteer");
-  const browserConfig = await getBrowserConfig();
-  const browser = await puppeteerModule.launch(browserConfig);
-  const page = await browser.newPage();
+  if (isLambda) {
+    return {
+      ...baseConfig,
+      headless: chromium.headless,
+      executablePath: await chromium.executablePath(),
+    };
+  } else {
+    const localPuppeteer = require("puppeteer");
+    return {
+      ...baseConfig,
+      headless: false, // Visible browser for local debugging
+      executablePath: localPuppeteer.executablePath(),
+    };
+  }
+};
 
-  page.setDefaultTimeout(scraperConfig.timeout);
-  page.setDefaultNavigationTimeout(scraperConfig.timeout);
-
-  // error monitoring
-  page.on("error", (err) => console.error("[PAGE ERROR]", err));
-  page.on("pageerror", (err) => console.error("[BROWSER PAGE ERROR]", err));
+const tickpickMultiScraper = async ({ eventUrl, scraperLogger }) => {
+  let browser;
+  let page;
 
   try {
+    const browserConfig = await getBrowserConfig();
+    
+    // Configure puppeteer-extra to use puppeteer-core in Lambda
+    if (isLambda) {
+      const puppeteerCore = require("puppeteer-core");
+      puppeteerExtra.puppeteer = puppeteerCore;
+    }
+
+    browser = await puppeteerExtra.launch(browserConfig);
+    page = await browser.newPage();
+
+
     await beginScraping(page, eventUrl, scraperLogger);
 
     if (successfullListings.length <= 0) {
@@ -221,54 +224,61 @@ const tickpickMultiScraper = async ({
 
     return [...successfullListings];
   } catch (error) {
-    scraperLogger.error(`Error occurred: ${error}`);
-    throw new Error(error);
+    // Take screenshot for debugging
+    if (page) {
+      await page.screenshot({ path: isLambda ? "/tmp/error.png" : "./error.png" });
+      const s3Key = `tickpick.png`;
+      await uploadFileToS3({
+        localFilePath: "/tmp/error.png",
+        s3Key,
+      })
+    }
+    scraperLogger.error(`Error occurred: ${error.message}`);
+    throw error;
   } finally {
     successfullListings = [];
-    if (page) {
-      await page.close();
-    }
-    if (context) {
-      await context.close();
-    }
-    if (browser) {
-      await browser.close();
-    }
+    if (page) await page.close().catch(e => console.error(e));
+    if (browser) await browser.close().catch(e => console.error(e));
   }
 };
 
 exports.handler = async (event) => {
-    const eventUrl = event.eventUrl || event.queryStringParameters?.eventUrl;
-  
-    const scraperLogger = {
-      log: (...args) => console.log("[LOG]", ...args),
-      error: (...args) => console.error("[ERROR]", ...args),
-    };
-  
-    try {
-      const result = await tickpickMultiScraper({ eventUrl, scraperLogger });
-  
-      return {
-        statusCode: 200,
-        body: JSON.stringify(result),
-        count: result.length,
-      };
-    } catch (err) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: err.message }),
-      };
-    }
-  };
-  
-  // ✅ Local run support
-  if (!isLambda && require.main === module) {
-    (async () => {
-      const result = await exports.handler({
-        eventUrl:
-          "https://www.tickpick.com/buy-tickets/6747335/",
-      });
-      console.log("🔎 Result:", result);
-    })();
-  }
+  const eventUrl = event.eventUrl || event.queryStringParameters?.eventUrl;
 
+  const scraperLogger = {
+    log: (...args) => console.log("[LOG]", ...args),
+    error: (...args) => console.error("[ERROR]", ...args),
+  };
+
+  try {
+    const result = await tickpickMultiScraper({ eventUrl, scraperLogger });
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify(result),
+      count: result.length,
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ 
+        error: err.message,
+        details: isLambda ? "Check Lambda logs for more details" : err.stack 
+      }),
+    };
+  }
+};
+
+// Local testing
+if (!isLambda && require.main === module) {
+  (async () => {
+    try {
+      const result = await exports.handler({
+        eventUrl: "https://www.tickpick.com/buy-tickets/6747335/",
+      });
+      console.log("Scraping result:", result);
+    } catch (error) {
+      console.error("Local test failed:", error);
+    }
+  })();
+}
