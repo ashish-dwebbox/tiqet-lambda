@@ -1,10 +1,9 @@
-const puppeteer = require("puppeteer-core");
 const chromium = require("@sparticuz/chromium");
 const cheerio = require("cheerio");
 const addDelay = require('./scraperUtils')
 const os = require("os");
 
-const isLambda = false;
+const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
 const width = 1280;
 const height = 720;
 
@@ -102,7 +101,7 @@ const beginScraping = async (page, eventUrl, scraperLogger) => {
     timeout: scraperConfig.timeout,
   });
 
-  await addDelay(5, null, null, scraperLogger);
+  await addDelay(10, null, null, scraperLogger);
   await extractListings(page, scraperLogger);
   await generateJson(page, scraperLogger);
 };
@@ -200,6 +199,6 @@ if (!isLambda && require.main === module) {
       eventUrl:
         "https://www.vividseats.com/new-york-knicks-tickets-madison-square-garden-6-3-2025--sports-nba-basketball/production/5561986",
     });
-    console.log("🔎 Result:", result.body);
+    console.log("🔎 Result:", result);
   })();
 }
